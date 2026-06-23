@@ -5,29 +5,37 @@ from flask_jwt_extended import (
     jwt_required, get_jwt_identity
 )
 from groq import Groq
+from dotenv import load_dotenv
+import os
 import bcrypt
 import csv
 import io
 import json
 from database import init_db, get_db
-from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app, origins=[
-    "http://localhost:5173",    #local react frontend
-    "https://finance-chatbot-green.vercel.app" #deployed react frontend
+    "http://localhost:5173",
+    "https://finance-chatbot-green.vercel.app"
 ])
 
-app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY","fallback-key")  # change this to anything random
+app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "fallback-key")
 jwt = JWTManager(app)
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))  # your groq key
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# Initialize database on startup
 init_db()
+
+
+# ─────────────────────────────────────────
+#  PING ROUTE
+# ─────────────────────────────────────────
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "awake"})
 
 
 # ─────────────────────────────────────────
@@ -46,7 +54,6 @@ def register():
     if len(password) < 6:
         return jsonify({"error": "Password must be at least 6 characters"}), 400
 
-    # Hash the password before storing
     hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
 
     conn = get_db()
@@ -78,11 +85,9 @@ def login():
     if not user:
         return jsonify({"error": "Invalid email or password"}), 401
 
-    # Check password against stored hash
     if not bcrypt.checkpw(password.encode("utf-8"), user["password"].encode("utf-8")):
         return jsonify({"error": "Invalid email or password"}), 401
 
-    # Create a JWT token — this is what the frontend stores to stay logged in
     token = create_access_token(identity=str(user["id"]))
     return jsonify({"token": token, "email": email})
 
@@ -92,9 +97,9 @@ def login():
 # ─────────────────────────────────────────
 
 @app.route("/upload", methods=["POST"])
-@jwt_required()  # only logged in users can upload
+@jwt_required()
 def upload_file():
-    user_id = get_jwt_identity()  # gets the logged-in user's ID from token
+    user_id = get_jwt_identity()
     file = request.files.get("file")
 
     if not file:
@@ -108,9 +113,7 @@ def upload_file():
     else:
         transactions = [{"raw": line} for line in content.splitlines() if line.strip()]
 
-    # Save transactions to database for this user
     conn = get_db()
-    # Delete old transactions for this user first
     conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
     conn.execute(
         "INSERT INTO transactions (user_id, data, filename) VALUES (?, ?, ?)",
@@ -128,6 +131,56 @@ def upload_file():
 
 
 # ─────────────────────────────────────────
+#  HELPER: BUILD SUMMARY FOR AI
+# ─────────────────────────────────────────
+
+def build_summary(transactions):
+    # Total spent
+    total_spent = sum(float(t.get('amount', 0)) for t in transactions)
+
+    # Category totals
+    category_totals = {}
+    for t in transactions:
+        cat = t.get('category', 'Other')
+        amount = float(t.get('amount', 0))
+        category_totals[cat] = category_totals.get(cat, 0) + amount
+
+    category_summary = "\n".join(
+        f"  - {cat}: ${total:.2f}"
+        for cat, total in sorted(category_totals.items(), key=lambda x: -x[1])
+    )
+
+    # Monthly totals
+    monthly_totals = {}
+    for t in transactions:
+        date = t.get('date', '')
+        if date:
+            # gets "2024-01" from "2024-01-15"
+            month = date[:7]
+            amount = float(t.get('amount', 0))
+            monthly_totals[month] = monthly_totals.get(month, 0) + amount
+
+    monthly_summary = "\n".join(
+        f"  - {month}: ${total:.2f}"
+        for month, total in sorted(monthly_totals.items())
+    )
+
+    # Monthly category breakdown
+    monthly_category = {}
+    for t in transactions:
+        date = t.get('date', '')
+        cat = t.get('category', 'Other')
+        amount = float(t.get('amount', 0))
+        if date:
+            month = date[:7]
+            if month not in monthly_category:
+                monthly_category[month] = {}
+            monthly_category[month][cat] = monthly_category[month].get(cat, 0) + amount
+
+    return total_spent, category_summary, monthly_summary
+
+
+# ─────────────────────────────────────────
 #  CHAT ROUTE
 # ─────────────────────────────────────────
 
@@ -139,7 +192,6 @@ def chat():
     user_question = data.get("question", "")
     chat_history = data.get("history", [])
 
-    # Load this user's transactions from database
     conn = get_db()
     row = conn.execute(
         "SELECT data FROM transactions WHERE user_id = ? ORDER BY uploaded_at DESC LIMIT 1",
@@ -151,25 +203,40 @@ def chat():
 
     transactions = json.loads(row["data"])
 
-    # Save this message to chat history
+    # Save user message to chat history
     conn.execute(
         "INSERT INTO chat_history (user_id, role, message) VALUES (?, ?, ?)",
         (user_id, "user", user_question)
     )
     conn.commit()
 
+    # Build transaction text
     tx_text = "\n".join(
         ", ".join(f"{k}: {v}" for k, v in t.items())
         for t in transactions
     )
 
-    system_prompt = f"""You are a personal finance assistant.
-The user uploaded their transaction data below.
-Answer questions clearly based only on this data.
-Do calculations if needed. Format numbers as currency (e.g. $45.00).
-Be concise and helpful.
+    # Build pre-calculated summaries
+    total_spent, category_summary, monthly_summary = build_summary(transactions)
 
---- TRANSACTION DATA ---
+    system_prompt = f"""You are a personal finance assistant.
+Answer questions clearly based only on the data provided below.
+Format numbers as currency (e.g. $45.00).
+Be concise and helpful.
+IMPORTANT: Always use the pre-calculated totals for accuracy. Do not try to manually add up transactions.
+
+--- PRE-CALCULATED TOTALS (use these for accuracy) ---
+Total Spent: ${total_spent:.2f}
+Number of Transactions: {len(transactions)}
+
+Category Breakdown (sorted by highest spend):
+{category_summary}
+
+Monthly Breakdown:
+{monthly_summary}
+--- END PRE-CALCULATED TOTALS ---
+
+--- FULL TRANSACTION DATA ---
 {tx_text}
 --- END DATA ---"""
 
@@ -198,7 +265,7 @@ Be concise and helpful.
 
 
 # ─────────────────────────────────────────
-#  GET SAVED CHAT HISTORY
+#  CHAT HISTORY ROUTE
 # ─────────────────────────────────────────
 
 @app.route("/history", methods=["GET"])

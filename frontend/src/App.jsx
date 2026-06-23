@@ -12,15 +12,25 @@ const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#3b82f6","#ec4899","#14
 function buildStats(transactions) {
   const categoryTotals = {};
   let totalSpent = 0;
+
   transactions.forEach(row => {
-    const amount = parseFloat(row.amount || row.Amount || 0);
+    // Remove $ signs and commas before parsing
+    const rawAmount = row.amount || row.Amount || "0";
+    const cleanAmount = String(rawAmount).replace(/[$,]/g, "").trim();
+    const amount = parseFloat(cleanAmount) || 0;
+
     const category = row.category || row.Category || row.description || row.Description || "Other";
-    totalSpent += amount;
-    categoryTotals[category] = (categoryTotals[category] || 0) + amount;
+    
+    if (amount > 0) {  // skip zero or invalid amounts
+      totalSpent += amount;
+      categoryTotals[category] = (categoryTotals[category] || 0) + amount;
+    }
   });
+
   const chartData = Object.entries(categoryTotals)
     .map(([name, value]) => ({ name, value: parseFloat(value.toFixed(2)) }))
     .sort((a, b) => b.value - a.value);
+
   return { totalSpent, chartData, topCategory: chartData[0] || { name: "N/A", value: 0 } };
 }
 
@@ -46,6 +56,11 @@ export default function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+  
+    useEffect(() => {
+    fetch(`${import.meta.env.VITE_API_URL}/ping`)
+      .catch(() => {});
+  }, []);
 
   async function loadHistory() {
     const res = await fetch(`${import.meta.env.VITE_API_URL}/history`, {
@@ -60,10 +75,11 @@ export default function App() {
   }
 
   function handleLogin(newToken, newEmail) {
-    setToken(newToken);
+     setToken(newToken);
     setEmail(newEmail);
+    setMessages([{ role: "assistant", text: "Hi! Upload your transactions CSV, then ask me anything about your spending." }]);
     setPage("app");
-    loadHistory();
+    setTimeout(() => loadHistory(), 100);
   }
 
   function handleLogout() {
