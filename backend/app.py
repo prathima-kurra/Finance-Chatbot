@@ -16,7 +16,10 @@ import os
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:5173",    #local react frontend
+    "https://finance-chatbot-green.vercel.app" #deployed react frontend
+])
 
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY","fallback-key")  # change this to anything random
 jwt = JWTManager(app)
