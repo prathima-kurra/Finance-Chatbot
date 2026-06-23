@@ -16,10 +16,7 @@ from database import init_db, get_db
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=[
-    "http://localhost:5173",
-    "https://finance-chatbot-green.vercel.app"
-])
+CORS(app, origins="*")
 
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "fallback-key")
 jwt = JWTManager(app)
